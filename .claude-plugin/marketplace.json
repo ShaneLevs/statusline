@@ -1,0 +1,6 @@
+{
+  "name": "local-mods",
+  "owner": { "name": "shanelevs" },
+  "description": "shanelevs' local Claude Code mods.",
+  "plugins": [{ "name": "statusline", "source": "./" }]
+}

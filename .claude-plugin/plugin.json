@@ -1,0 +1,7 @@
+{
+  "name": "statusline",
+  "version": "0.1.0",
+  "description": "A two-line status band above the prompt: model, thinking effort, context window fill, cache hit rate, project, git branch and working-tree state.",
+  "author": { "name": "shanelevs" },
+  "types": "./types/index.d.ts"
+}
