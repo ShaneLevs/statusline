@@ -25,7 +25,7 @@
 在终端版 Claude Code 的输入框中输入：
 
 ```
-/plugin install statusline --marketplace <owner>/<repo>
+/plugin install statusline --marketplace ShaneLevs/statusline
 ```
 
 `y` 确认添加 marketplace，然后选 user 作用域（每个会话都生效）。装好后本会话立即生效，之后每个新会话自动加载。
