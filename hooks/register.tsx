@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, TurnStepResult } from 'claude-code'
 
+import { chunkChars, createRateMeter } from './rate'
 import { baseName, cachePercentOf, effortLabel, parseGitStatus, parseNumstat, statusSegments } from './util'
 import type { Tone } from './util'
-import type { GitInfo, StatusStat } from '../types'
+import type { GitInfo, StatusStat, TokenRate } from '../types'
 
 /** How often the line re-reads session and git state, in milliseconds. */
 const REFRESH_MS = 5000
@@ -16,9 +17,13 @@ const INITIAL: StatusStat = {
   contextWindow: null,
   project: '',
   git: null,
+  tokenRate: null,
 }
 
 const stat = atom({ plugin: 'statusline', key: 'stat' } as const, INITIAL)
+
+/** How fast the model is writing, kept across the session; the host's state holds what the line shows. */
+const rate = createRateMeter()
 
 /** The Text props one tone draws with. */
 function toneProps(tone: Tone): { color?: 'claude' | 'success' | 'warning' | 'error'; dimColor?: true } {
@@ -44,6 +49,12 @@ async function patch($: EngineInterface, change: Partial<StatusStat>): Promise<v
   } catch {
     // Keep the last reading; the next refresh tries again.
   }
+}
+
+/** Draws a speed the meter has read, when it read one. */
+async function publishRate($: EngineInterface, reading: TokenRate | null): Promise<void> {
+  if (reading === null) return
+  await patch($, { tokenRate: reading })
 }
 
 /** One `git status` and one `git diff`, merged; null outside a repository. */
@@ -102,16 +113,57 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A subagent's run raises no `turn.start`: every step of one turn, the
+  // spawner's and its subagents' alike, is counted into that turn.
+  on('turn.start', ($, e, next) => {
+    rate.startTurn()
+    return next(e)
+  })
+
   on('turn.step', async function* ($, e, next) {
     if (e.agentId === undefined) {
       await patch($, { effort: effortLabel(e.effort) })
     }
-    yield* next(e)
+
+    const key = `${e.turnId}:${e.index}`
+    rate.startStep(key, await $.clock.now())
+
+    const stream = next(e)
+    for await (const chunk of stream) {
+      const chars = chunkChars(chunk)
+      if (chars > 0) {
+        const streamedAt = await $.clock.now()
+        rate.addChars(key, chars, streamedAt)
+        if (rate.wantsReading()) await publishRate($, rate.take(streamedAt))
+      }
+      yield chunk
+    }
+
+    // The response is in: its own token count settles the step, exactly. The
+    // words were already counted as they streamed, in characters.
+    let response: TurnStepResult
+    try {
+      response = await stream.result
+    } catch (error) {
+      // A closed stream: the response never settled, so nothing is counted.
+      rate.endStep(key, null, await $.clock.now())
+      throw error
+    }
+
+    const settledAt = await $.clock.now()
+    rate.endStep(key, response.usage?.output_tokens ?? null, settledAt)
+    await publishRate($, rate.take(settledAt))
+
+    return response
   })
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId === undefined) await refresh($)
+    if (e.agentId === undefined) {
+      // The turn's average, kept on the line until the next turn measures its own.
+      await publishRate($, rate.endTurn())
+      await refresh($)
+    }
     return done
   })
 

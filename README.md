@@ -1,9 +1,9 @@
 # statusline
 
-一个 Claude Code mod（hooks 插件）：在输入框下方画一行会话状态——模型、思考强度、上下文占用、缓存命中率、项目、分支、git 改动。
+一个 Claude Code mod（hooks 插件）：在输入框下方画一行会话状态——模型、思考强度、上下文占用、缓存命中率、项目、分支、git 改动、输出速率。
 
 ```
- deepseek-flash[1m] · max · 9%/1.0M · 99% · HTML · main · +12 -3 ↑2
+ deepseek-flash[1m] · max · 9%/1.0M · 99% · HTML · main · +12 -3 ↑2 · 48 tok/s
 ```
 
 字段按上面的顺序排列，用灰色的 ` · ` 连接：
@@ -17,8 +17,17 @@
 | 项目 | 蓝 | 会话根目录的最后一段 |
 | 分支 | 蓝 | 当前分支（detached 时是 `detached@<oid>`） |
 | git 改动 | 绿 `+N` / 红 `-N` / `↑N` | 新增行、删除行、待 push 的提交数；干净时显示绿色 `✓` |
+| 输出速率 | 默认 / 暗色（实时估算中） | 每秒生成多少 token |
 
 没数据的字段自动省略；不在 git 仓库里时省略分支和 git 部分。原来的提示行（`? for shortcuts` 等）保留在它自己的位置，状态行画在下一行。
+
+### 输出速率怎么算
+
+- **一轮** = 一次 `turn.start` 到 `turn.complete` 之间所有模型请求，子 agent 的也算在内。
+- **一轮的平均值** = 这些请求 API 报告的 `output_tokens` 之和 ÷ 它们**真正在生成**的时间之和。工具执行、等用户、等首字的时间都排除在外——否则跑一个一分钟的 `Bash` 会把速率算成个位数，没有参考价值。thinking token 和工具调用的参数 JSON 都算输出 token。
+- **实时值**（生成中，暗色）流式响应还没有 token 计数，只能按流出来的字符数估算；「字符 → token」的比率由本会话已完成的请求在线校准，中英文自动适配，所以它会随会话越来越准。实时值只在一轮生成中显示，一闪而过的请求（不足 0.4 秒）不显示。
+- 一轮结束后，最后那一轮的**平均值**一直显示（默认色），直到下一轮开始重新测量。
+
 
 ## 安装
 
@@ -56,6 +65,7 @@
 hooks/
   hooks.json         模块入口
   register.tsx        hook 注册：采集数据 + 绘制状态行
+  rate.ts             输出速率：按轮统计、在线校准、实时/结算两种读数
   util.ts            纯函数：解析 git 输出、格式化、拼装字段
 types/index.d.ts     $.state 契约（claude plugin validate 按它校验状态键）
 tests/statusline.test.ts
@@ -64,7 +74,7 @@ tests/statusline.test.ts
 ## 开发
 
 - 校验：`claude plugin validate .`
-- 测试：`claude plugin test .`（6 个用例：字段顺序/颜色、git 解析、无数据时让位给原提示行等）
+- 测试：`claude plugin test .`（13 个用例：字段顺序/颜色、git 解析、速率计量的实时值/结算值/中断、无数据时让位给原提示行等）
 - 以文件夹 marketplace 方式安装时，改完源码运行 `/reload-plugins` 即可，无需重装、无需改版本号。
 - 发布新版本：把 `plugin.json` 的 `version` 加一后提交；使用者运行 `claude plugin update` 获取。
 

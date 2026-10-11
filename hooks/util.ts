@@ -24,6 +24,14 @@ export function effortLabel(effort: string | number | undefined): string | null 
   return effort === undefined ? null : String(effort)
 }
 
+/** A speed in tokens a second, as the line spells it: `48 tok/s`, a tenth of one under ten. */
+export function formatRate(perSecond: number): string {
+  if (!Number.isFinite(perSecond) || perSecond <= 0) return '0 tok/s'
+
+  const shown = perSecond >= 10 ? Math.round(perSecond) : Math.round(perSecond * 10) / 10
+  return `${shown} tok/s`
+}
+
 /**
  * Reads `git status --porcelain=v2 --branch`: the branch (or a detached
  * short oid) and how many commits it is ahead of its upstream. Null when the
@@ -90,8 +98,9 @@ const SEPARATOR: Segment = { text: ' · ', tone: 'dim' }
 
 /**
  * The one line the band draws under the prompt, fields in order and joined
- * with " · ": model, effort, context fill and window, cache, project, branch
- * and working-copy state. Unknown fields drop out; [] when nothing is known.
+ * with " · ": model, effort, context fill and window, cache, project, branch,
+ * working-copy state and how fast the model is writing. Unknown fields drop
+ * out; [] when nothing is known.
  */
 export function statusSegments(stat: StatusStat): Segment[] {
   const fields: Segment[][] = []
@@ -116,6 +125,12 @@ export function statusSegments(stat: StatusStat): Segment[] {
     if (stat.git.deleted > 0) marks.push({ text: `-${stat.git.deleted}`, tone: 'bad' })
     if (stat.git.ahead > 0) marks.push({ text: `↑${stat.git.ahead}`, tone: 'plain' })
     fields.push(marks.length === 0 ? [{ text: '✓', tone: 'good' }] : spaced(marks))
+  }
+
+  if (stat.tokenRate !== null) {
+    // A live reading is an estimate off the streamed characters; the settled
+    // average counted real tokens. The line spells them alike and dims the guess.
+    fields.push([{ text: formatRate(stat.tokenRate.perSecond), tone: stat.tokenRate.isLive ? 'dim' : 'plain' }])
   }
 
   const out: Segment[] = []

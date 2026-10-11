@@ -15,6 +15,14 @@ export type GitInfo = {
   deleted: number
 }
 
+/** How fast the model writes, as the line shows it. */
+export type TokenRate = {
+  /** Tokens a second: the average of the requests counted so far. */
+  perSecond: number
+  /** True while a turn runs, the figure a live estimate; false, the last turn's settled average. */
+  isLive: boolean
+}
+
 /** Everything the line shows. Nullable fields drop out of the line. */
 export type StatusStat = {
   /** The main loop's model, as `/model` shows it. */
@@ -31,6 +39,8 @@ export type StatusStat = {
   project: string
   /** The git working copy, or null outside a repository. */
   git: GitInfo | null
+  /** How fast the model wrote, or null while nothing has been measured. */
+  tokenRate: TokenRate | null
 }
 
 declare module 'claude-code' {
