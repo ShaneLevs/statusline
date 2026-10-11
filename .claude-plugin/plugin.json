@@ -1,6 +1,6 @@
 {
   "name": "statusline",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A two-line status band above the prompt: model, thinking effort, context window fill, cache hit rate, project, git branch, working-tree state and the model's output speed in tokens a second.",
   "author": { "name": "shanelevs" },
   "types": "./types/index.d.ts"

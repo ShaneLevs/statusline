@@ -17,10 +17,10 @@ export type GitInfo = {
 
 /** How fast the model writes, as the line shows it. */
 export type TokenRate = {
-  /** Tokens a second: the average of the requests counted so far. */
+  /** Tokens a second: one request's own rate, or a whole turn's average. */
   perSecond: number
-  /** True while a turn runs, the figure a live estimate; false, the last turn's settled average. */
-  isLive: boolean
+  /** True once the turn it belongs to ended, the figure its requests' average; false, one request's own. */
+  isSettled: boolean
 }
 
 /** Everything the line shows. Nullable fields drop out of the line. */

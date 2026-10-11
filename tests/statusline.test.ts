@@ -1,12 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 import type { SessionUsage } from 'claude-code'
 
-import { calibratedCharsPerToken, chunkChars, createRateMeter } from '../hooks/rate'
+import { createRateMeter, isWritingChunk } from '../hooks/rate'
 import {
   cachePercentOf,
   effortLabel,
   formatRate,
   formatTokens,
+  heldStat,
   parseGitStatus,
   parseNumstat,
   statusSegments,
@@ -38,7 +39,7 @@ test('the line spells the fields in order and drops the unknown ones', () => {
     contextWindow: 1_000_000,
     project: 'energy-service',
     git: { branch: 'feat/topology', ahead: 2, added: 120, deleted: 45 },
-    tokenRate: { perSecond: 42.4, isLive: false },
+    tokenRate: { perSecond: 42.4, isSettled: true },
   }
   expect(joined(full)).toBe(
     'glm-5.3-flash · high · 4%/1.0M · 95% · energy-service · feat/topology · +120 -45 ↑2 · 42 tok/s',
@@ -63,15 +64,15 @@ test('the line spells the fields in order and drops the unknown ones', () => {
   expect(statusSegments(EMPTY)).toEqual([])
 })
 
-test('the speed lands last, dim while it is an estimate and plain once settled', () => {
+test('the speed lands last, dim while its turn runs and plain once the turn is over', () => {
   const git = { branch: 'main', ahead: 0, added: 0, deleted: 0 }
-  const settled = { ...EMPTY, model: 'm', git, tokenRate: { perSecond: 48.4, isLive: false } }
-  const live = { ...EMPTY, model: 'm', git, tokenRate: { perSecond: 9.87, isLive: true } }
+  const settled = { ...EMPTY, model: 'm', git, tokenRate: { perSecond: 48.4, isSettled: true } }
+  const running = { ...EMPTY, model: 'm', git, tokenRate: { perSecond: 9.87, isSettled: false } }
 
   expect(joined(settled)).toBe('m · main · ✓ · 48 tok/s')
-  expect(joined(live)).toBe('m · main · ✓ · 9.9 tok/s')
+  expect(joined(running)).toBe('m · main · ✓ · 9.9 tok/s')
   expect(statusSegments(settled).at(-1)?.tone).toBe('plain')
-  expect(statusSegments(live).at(-1)?.tone).toBe('dim')
+  expect(statusSegments(running).at(-1)?.tone).toBe('dim')
 })
 
 test('parseGitStatus reads the branch and the commits to push', () => {
@@ -115,105 +116,39 @@ test('formatTokens, cachePercentOf and effortLabel hold the display rules', () =
   expect(formatRate(0)).toBe('0 tok/s')
 })
 
-test('the meter reads a live estimate off the stream and settles on the real counts', () => {
+test('the meter reads a rate per request and the turn average at the end', () => {
   const meter = createRateMeter()
   meter.startTurn()
-  meter.startStep('t1:0', 1_000)
 
-  // The response starts writing half a second later; that is where its clock starts.
-  meter.addChars('t1:0', 120, 1_500)
-  expect(meter.wantsReading()).toBe(true)
+  // A request that wrote 70 tokens over the second it took.
+  expect(meter.endStep(70, 1_000)).toEqual({ perSecond: 70, isSettled: false })
 
-  // Two hundred milliseconds of writing is too soon to read a rate off, and the reading is spent.
-  expect(meter.take(1_700)).toBeNull()
-  expect(meter.wantsReading()).toBe(false)
+  // A slower one: its own figure is what the line reads next, not the run so far.
+  expect(meter.endStep(30, 1_000)).toEqual({ perSecond: 30, isSettled: false })
 
-  // Half a second of writing: 120 characters at the fallback four a token are 30 tokens.
-  expect(meter.take(2_000)).toEqual({ perSecond: 60, isLive: true })
-
-  // The response settles, saying it generated 40 tokens over that one second of writing.
-  meter.endStep('t1:0', 40, 2_500)
-
-  // Between requests the turn's average stands, and it is exact.
-  expect(meter.take(2_500)).toEqual({ perSecond: 40, isLive: true })
-
-  // CJK streams at a character a token, which the settled request has taught it.
-  expect(Math.round(calibratedCharsPerToken(4, 120, 40) * 10) / 10).toBe(3.7)
-  meter.startStep('t1:1', 3_000)
-  meter.addChars('t1:1', 60, 3_500)
-  expect(Math.round(meter.take(4_100)?.perSecond ?? 0)).toBe(27)
-
-  meter.endStep('t1:1', 40, 4_500)
-
-  // Forty tokens in each of the two seconds writing took.
-  expect(meter.endTurn()).toEqual({ perSecond: 40, isLive: false })
+  // The turn's figure is its requests' summed: 100 tokens over two seconds.
+  expect(meter.endTurn()).toEqual({ perSecond: 50, isSettled: true })
 })
 
-test('a reading costs one clock read per stretch of characters', () => {
+test('a request that counted no tokens leaves the last reading alone', () => {
   const meter = createRateMeter()
   meter.startTurn()
-  meter.startStep('t1:0', 0)
 
-  meter.addChars('t1:0', 47, 100)
-  expect(meter.wantsReading()).toBe(false)
-  meter.addChars('t1:0', 1, 200)
-  expect(meter.wantsReading()).toBe(true)
+  // An interrupt, an empty response, a request too short to time.
+  expect(meter.endStep(null, 1_000)).toBeNull()
+  expect(meter.endStep(0, 1_000)).toBeNull()
+  expect(meter.endStep(40, 0)).toBeNull()
 
-  // Twelve estimated tokens over the half second since the first characters.
-  expect(meter.take(600)).toEqual({ perSecond: 24, isLive: true })
-  expect(meter.wantsReading()).toBe(false)
-})
-
-test('a turn that settled no tokens leaves the last reading alone', () => {
-  const meter = createRateMeter()
-  meter.startTurn()
-  meter.startStep('t1:0', 0)
-  meter.addChars('t1:0', 200, 0)
-  expect(meter.take(1_000)).toEqual({ perSecond: 50, isLive: true })
-
-  // An interrupt: no response settled, so the step counts nothing.
-  meter.endStep('t1:0', null, 1_000)
-  expect(meter.take(1_000)).toBeNull()
   expect(meter.endTurn()).toBeNull()
 })
 
-test('two requests streaming at once are counted apart', () => {
-  const meter = createRateMeter()
-  meter.startTurn()
-
-  // The main loop's request, and a subagent's writing alongside it.
-  meter.startStep('t1:0', 0)
-  meter.addChars('t1:0', 400, 0)
-  meter.startStep('sub:0', 500)
-  meter.addChars('sub:0', 40, 900)
-
-  // The reading follows the request that streamed last: ten estimated tokens over the half second it has written for.
-  expect(meter.take(1_400)).toEqual({ perSecond: 20, isLive: true })
-
-  // The subagent's settles with its own count; the main loop's is still open,
-  // so what is read now is the turn's average, exact.
-  meter.endStep('sub:0', 20, 1_400)
-  expect(meter.take(1_400)).toEqual({ perSecond: 40, isLive: true })
-
-  meter.endStep('t1:0', 30, 2_000)
-
-  // Fifty real tokens over the two and a half seconds the two requests wrote for.
-  expect(meter.take(2_500)).toEqual({ perSecond: 20, isLive: true })
-
-  // A request that has only just gone out says nothing of its own.
-  meter.startStep('t1:1', 2_600)
-  expect(meter.take(2_600)).toEqual({ perSecond: 20, isLive: true })
-
-  expect(meter.endTurn()).toEqual({ perSecond: 20, isLive: false })
-})
-
-test('chunkChars counts what the model pays output tokens for', () => {
-  expect(chunkChars({ kind: 'text', index: 0, text: 'hello' })).toBe(5)
-  expect(chunkChars({ kind: 'thinking', index: 0, text: 'hm' })).toBe(2)
-  expect(chunkChars({ kind: 'input', index: 1, json: '{"a":1}' })).toBe(7)
-  expect(chunkChars({ kind: 'tool', index: 1, id: 'toolu_1', name: 'Read' })).toBe(0)
-  expect(chunkChars({ kind: 'stop', stopReason: 'end_turn', usage: null })).toBe(0)
-  expect(chunkChars({ kind: 'engine', ref: 1 })).toBe(0)
+test('isWritingChunk counts what the model pays output tokens for', () => {
+  expect(isWritingChunk({ kind: 'text', index: 0, text: 'hello' })).toBe(true)
+  expect(isWritingChunk({ kind: 'thinking', index: 0, text: '' })).toBe(true)
+  expect(isWritingChunk({ kind: 'input', index: 1, json: '{"a":1}' })).toBe(true)
+  expect(isWritingChunk({ kind: 'tool', index: 1, id: 'toolu_1', name: 'Read' })).toBe(false)
+  expect(isWritingChunk({ kind: 'stop', stopReason: 'end_turn', usage: null })).toBe(false)
+  expect(isWritingChunk({ kind: 'engine', ref: 1 })).toBe(false)
 })
 
 const HINT_PROPS = { isDraft: false, isWorking: false, hint: '? for shortcuts' }
@@ -317,7 +252,7 @@ test('the line yields to the engine hint before anything is known', async ($, on
   await ui.unmount()
 })
 
-test('a streaming turn draws its speed as it writes, then keeps the turn average', async ($, on) => {
+test('a turn settles a rate per request, then the turn average', async ($, on) => {
   let time = 0
 
   on('clock.now', () => ({ value: time }))
@@ -332,34 +267,40 @@ test('a streaming turn draws its speed as it writes, then keeps the turn average
   // The engine's own hint row, which the band yields to before anything is known.
   on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', children: ['? for shortcuts'] }))
 
-  // The engine beneath: two flushes, one and two seconds in, and a response
-  // that says the request generated seventy tokens.
-  on('turn.step', async function* () {
-    time = 500
-    yield { kind: 'text', index: 0, text: 'a'.repeat(120) }
-    time = 1_500
-    yield { kind: 'text', index: 0, text: 'b'.repeat(120) }
+  const writing = { kind: 'text' as const, index: 0, text: 'a'.repeat(120) }
+  const answered = (index: number, outputTokens: number) => ({
+    turnId: 't1',
+    index,
+    answer: '',
+    toolUses: [],
+    stopReason: 'end_turn' as const,
+    usage: {
+      input_tokens: 5,
+      output_tokens: outputTokens,
+      cache_read_input_tokens: 95,
+      cache_creation_input_tokens: 0,
+      model: 'test-model',
+    },
+  })
 
-    return {
-      turnId: 't1',
-      index: 0,
-      answer: '',
-      toolUses: [],
-      stopReason: 'end_turn',
-      usage: {
-        input_tokens: 5,
-        output_tokens: 70,
-        cache_read_input_tokens: 95,
-        cache_creation_input_tokens: 0,
-        model: 'test-model',
-      },
+  // The engine beneath: two requests, each writing for its own second.
+  on('turn.step', async function* ($, e) {
+    if (e.index === 0) {
+      time = 500
+      yield writing
+      time = 1_500
+      yield writing
+      return answered(0, 70)
     }
+
+    time = 2_000
+    yield writing
+    time = 3_000
+    yield writing
+    return answered(1, 30)
   })
 
   await $.turn.start({ text: 'hello', turnId: 't1' })
-
-  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'test-model', messageCount: 1 })
-  const chunks = stream[Symbol.asyncIterator]()
 
   // One drawing of the band, read again after every flush.
   const ui = await $.ui.mount({
@@ -368,27 +309,65 @@ test('a streaming turn draws its speed as it writes, then keeps the turn average
     component: 'PromptHint',
     props: WORKING_PROPS,
   })
-  const speed = async (): Promise<string | undefined> =>
-    (await ui.findAll({ type: 'Text' })).map(el => el.text).find(text => text.endsWith('tok/s'))
+  const speed = async (): Promise<{ text: string; props: Record<string, unknown> } | undefined> =>
+    (await ui.findAll({ type: 'Text' })).find(el => el.text.endsWith('tok/s'))
 
-  // The request is out; nothing has been written yet.
+  /** One model request of the turn, pulled by hand so the line can be read mid-flight. */
+  const request = (index: number): AsyncIterator<unknown> =>
+    $.turn.step({ turnId: 't1', index, model: 'test-model', messageCount: 1 })[Symbol.asyncIterator]()
+
+  const first = request(0)
+
+  // The request is out; nothing has been measured yet.
   expect(await speed()).toBeUndefined()
 
-  // The first flush starts the clock but says nothing yet: too short to read a rate off.
-  await chunks.next()
+  // While a request writes, the line does not move: the reading waits for it to settle.
+  await first.next()
+  expect(await speed()).toBeUndefined()
+  await first.next()
   expect(await speed()).toBeUndefined()
 
-  // A second of writing, 240 characters read as 60 tokens.
-  await chunks.next()
-  expect(await speed()).toBe('60 tok/s')
+  // It settled: 70 tokens over the one second it spent writing, its own figure.
+  expect((await first.next()).done).toBe(true)
+  expect((await speed())?.text).toBe('70 tok/s')
+  expect((await speed())?.props.dimColor).toBe(true)
 
-  // The response settles: 70 real tokens over that one second of writing.
-  expect((await chunks.next()).done).toBe(true)
-  expect(await speed()).toBe('70 tok/s')
+  const second = request(1)
 
-  // The turn is over: the average stays, settled rather than estimated.
-  await $.turn.complete({ answer: '', durationMs: 2_000, isAborted: false, turnId: 't1', reason: 'answer' })
-  expect(await speed()).toBe('70 tok/s')
+  // The second request writes with the first one's figure still standing.
+  await second.next()
+  expect((await speed())?.text).toBe('70 tok/s')
+
+  await second.next()
+  expect((await second.next()).done).toBe(true)
+  expect((await speed())?.text).toBe('30 tok/s')
+
+  // The turn is over: what stays is its requests' average, 100 tokens over two seconds.
+  await $.turn.complete({ answer: '', durationMs: 3_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect((await speed())?.text).toBe('50 tok/s')
+  expect((await speed())?.props.dimColor).toBeUndefined()
 
   await ui.unmount()
+})
+
+test('a value an older version stored still draws the line', () => {
+  // `$.state` outlives the plugin's code, so what the host holds may be a
+  // value a build without the speed field wrote: its own fields draw, the
+  // rest come from the line's defaults rather than breaking the drawing.
+  const older: Partial<StatusStat> = {
+    model: 'test-model',
+    effort: 'high',
+    cachePercent: 90,
+    contextPercent: 4,
+    contextWindow: 1_000_000,
+    project: 'demo-proj',
+    git: null,
+  }
+
+  const held = heldStat(older)
+  expect(held.tokenRate).toBeNull()
+  expect(joined(held)).toBe('test-model · high · 4%/1.0M · 90% · demo-proj')
+
+  // Nothing stored at all draws nothing, rather than crashing on a missing field.
+  expect(statusSegments(heldStat(undefined))).toEqual([])
 })

@@ -1,26 +1,24 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, TurnStepResult } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
-import { chunkChars, createRateMeter } from './rate'
-import { baseName, cachePercentOf, effortLabel, parseGitStatus, parseNumstat, statusSegments } from './util'
+import { createRateMeter, isWritingChunk } from './rate'
+import {
+  INITIAL_STAT,
+  baseName,
+  cachePercentOf,
+  effortLabel,
+  heldStat,
+  parseGitStatus,
+  parseNumstat,
+  statusSegments,
+} from './util'
 import type { Tone } from './util'
 import type { GitInfo, StatusStat, TokenRate } from '../types'
 
 /** How often the line re-reads session and git state, in milliseconds. */
 const REFRESH_MS = 5000
 
-const INITIAL: StatusStat = {
-  model: '',
-  effort: null,
-  cachePercent: null,
-  contextPercent: null,
-  contextWindow: null,
-  project: '',
-  git: null,
-  tokenRate: null,
-}
-
-const stat = atom({ plugin: 'statusline', key: 'stat' } as const, INITIAL)
+const stat = atom({ plugin: 'statusline', key: 'stat' } as const, INITIAL_STAT)
 
 /** How fast the model is writing, kept across the session; the host's state holds what the line shows. */
 const rate = createRateMeter()
@@ -45,7 +43,9 @@ function toneProps(tone: Tone): { color?: 'claude' | 'success' | 'warning' | 'er
 
 async function patch($: EngineInterface, change: Partial<StatusStat>): Promise<void> {
   try {
-    await update($, stat, current => ({ ...current, ...change }))
+    // Held over the defaults, so a value an older build stored is completed
+    // rather than kept short of the fields this one reads.
+    await update($, stat, current => heldStat({ ...current, ...change }))
   } catch {
     // Keep the last reading; the next refresh tries again.
   }
@@ -125,34 +125,21 @@ export const register: Register = on => {
       await patch($, { effort: effortLabel(e.effort) })
     }
 
-    const key = `${e.turnId}:${e.index}`
-    rate.startStep(key, await $.clock.now())
+    const sentAt = await $.clock.now()
+    let writingAt: number | null = null
 
     const stream = next(e)
     for await (const chunk of stream) {
-      const chars = chunkChars(chunk)
-      if (chars > 0) {
-        const streamedAt = await $.clock.now()
-        rate.addChars(key, chars, streamedAt)
-        if (rate.wantsReading()) await publishRate($, rate.take(streamedAt))
-      }
+      // A request is timed by its writing, so the wait for its first token
+      // costs the rate nothing; one clock read per request, not per chunk.
+      if (writingAt === null && isWritingChunk(chunk)) writingAt = await $.clock.now()
       yield chunk
     }
 
-    // The response is in: its own token count settles the step, exactly. The
-    // words were already counted as they streamed, in characters.
-    let response: TurnStepResult
-    try {
-      response = await stream.result
-    } catch (error) {
-      // A closed stream: the response never settled, so nothing is counted.
-      rate.endStep(key, null, await $.clock.now())
-      throw error
-    }
-
+    // The response is in: its own token count settles the request, exactly.
+    const response = await stream.result
     const settledAt = await $.clock.now()
-    rate.endStep(key, response.usage?.output_tokens ?? null, settledAt)
-    await publishRate($, rate.take(settledAt))
+    await publishRate($, rate.endStep(response.usage?.output_tokens ?? null, settledAt - (writingAt ?? sentAt)))
 
     return response
   })
@@ -160,7 +147,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     if (e.agentId === undefined) {
-      // The turn's average, kept on the line until the next turn measures its own.
+      // The turn's average, kept on the line until the next turn settles its own.
       await publishRate($, rate.endTurn())
       await refresh($)
     }
@@ -171,7 +158,7 @@ export const register: Register = on => {
   // always sits on, the band drawn on the row under it. The engine's line
   // when nothing is known yet, the hint and the band after.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const segments = statusSegments(await read($, stat))
+    const segments = statusSegments(heldStat(await read($, stat)))
     if (segments.length === 0) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)

@@ -96,6 +96,30 @@ export type Segment = { text: string; tone: Tone }
 
 const SEPARATOR: Segment = { text: ' · ', tone: 'dim' }
 
+/** What the line draws from before anything is known: every field it can show, empty. */
+export const INITIAL_STAT: StatusStat = {
+  model: '',
+  effort: null,
+  cachePercent: null,
+  contextPercent: null,
+  contextWindow: null,
+  project: '',
+  git: null,
+  tokenRate: null,
+}
+
+/**
+ * The value the line draws, from what the host holds under the plugin's key.
+ *
+ * The host keeps `$.state` across a hot reload and across versions, so what it
+ * holds may be a value an older build wrote, without a key this one reads:
+ * every field the line shows is filled from the defaults, and the fields the
+ * value does carry stand.
+ */
+export function heldStat(held: Partial<StatusStat> | undefined): StatusStat {
+  return { ...INITIAL_STAT, ...held }
+}
+
 /**
  * The one line the band draws under the prompt, fields in order and joined
  * with " · ": model, effort, context fill and window, cache, project, branch,
@@ -128,9 +152,9 @@ export function statusSegments(stat: StatusStat): Segment[] {
   }
 
   if (stat.tokenRate !== null) {
-    // A live reading is an estimate off the streamed characters; the settled
-    // average counted real tokens. The line spells them alike and dims the guess.
-    fields.push([{ text: formatRate(stat.tokenRate.perSecond), tone: stat.tokenRate.isLive ? 'dim' : 'plain' }])
+    // A turn still running shows the rate of its last request alone; the
+    // settled figure is the turn's own average. The line dims the former.
+    fields.push([{ text: formatRate(stat.tokenRate.perSecond), tone: stat.tokenRate.isSettled ? 'plain' : 'dim' }])
   }
 
   const out: Segment[] = []
